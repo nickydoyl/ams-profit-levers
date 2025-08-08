@@ -22,35 +22,52 @@ BASELINE_MONTHLY = {
     "fx": 0.0,
 }
 
+RESET_KEYS = [
+    "currency","fx_rate","ext_sales_m","int_sales_m","ext_cost_pct",
+    "int_cost_pct","efficiency","fixed_m","repairs_m","fx_m",
+    "ext_sales_m_input","int_sales_m_input","ext_cost_pct_input",
+    "int_cost_pct_input","fixed_m_input","repairs_m_input","fx_m_input"
+]
+
 def reset_to_baseline():
-    st.session_state.currency = "AUD '000"
-    st.session_state.fx_rate = 24.0
-    st.session_state.ext_sales_m = BASELINE_MONTHLY["external_sales"]
-    st.session_state.int_sales_m = BASELINE_MONTHLY["internal_sales"]
-    st.session_state.ext_cost_pct = BASELINE_MONTHLY["ext_cost_pct"]
-    st.session_state.int_cost_pct = BASELINE_MONTHLY["int_cost_pct"]
-    st.session_state.efficiency = BASELINE_MONTHLY["efficiency"]
-    st.session_state.fixed_m = BASELINE_MONTHLY["fixed_costs"]
-    st.session_state.repairs_m = BASELINE_MONTHLY["repairs"]
-    st.session_state.fx_m = BASELINE_MONTHLY["fx"]
+    # Clear any widget state that may conflict
+    for k in RESET_KEYS:
+        st.session_state.pop(k, None)
+    # Seed fresh baseline state
+    st.session_state.update({
+        "currency": "AUD '000",
+        "fx_rate": 24.0,
+        "ext_sales_m": BASELINE_MONTHLY["external_sales"],
+        "int_sales_m": BASELINE_MONTHLY["internal_sales"],
+        "ext_cost_pct": BASELINE_MONTHLY["ext_cost_pct"],
+        "int_cost_pct": BASELINE_MONTHLY["int_cost_pct"],
+        "efficiency": BASELINE_MONTHLY["efficiency"],
+        "fixed_m": BASELINE_MONTHLY["fixed_costs"],
+        "repairs_m": BASELINE_MONTHLY["repairs"],
+        "fx_m": BASELINE_MONTHLY["fx"],
+    })
 
-if "ext_sales_m" not in st.session_state:
+# First run seed
+if "seeded" not in st.session_state:
     reset_to_baseline()
+    st.session_state["seeded"] = True
 
+# --------- Sidebar: Global Settings & Reset ---------
 with st.sidebar:
     st.header("Global Settings")
     currency = st.selectbox("Display Currency", ["AUD '000", "THB '000"], index=0, key="currency")
     fx_rate = st.number_input("FX Rate (THB per 1 AUD)", min_value=10.0, max_value=50.0,
-                               value=st.session_state.fx_rate, step=0.1, key="fx_rate")
+                               value=st.session_state.get("fx_rate", 24.0), step=0.1, key="fx_rate")
     if st.button("🔄 Reset to current baseline (51% efficiency, monthly averages)"):
         reset_to_baseline()
-        st.experimental_rerun()
+        st.rerun()
 
 mult = 1.0 if st.session_state.currency == "AUD '000" else st.session_state.fx_rate
 unit = "AUD'000" if st.session_state.currency == "AUD '000" else "THB'000"
 conv = 1.0 if unit.startswith("AUD") else (1.0 / st.session_state.fx_rate)
 
-colA, colB, colC = st.columns([1, 1, 1])
+# --------- Inputs (Monthly) ---------
+colA, colB, colC = st.columns([1,1,1])
 
 with colA:
     st.subheader("Monthly Sales")
@@ -58,24 +75,26 @@ with colA:
         f"External Sales per month ({unit})",
         min_value=0.0,
         value=st.session_state.ext_sales_m * mult,
-        step=50.0
+        step=50.0,
+        key="ext_sales_m_input"
     )
     int_sales = st.number_input(
         f"Internal Sales per month ({unit})",
         min_value=0.0,
         value=st.session_state.int_sales_m * mult,
-        step=50.0
+        step=50.0,
+        key="int_sales_m_input"
     )
 
 with colB:
     st.subheader("Product Cost % of Sales")
     ext_cost_pct = st.slider(
         "External Product Cost (% of sales)", 0, 100, int(st.session_state.ext_cost_pct * 100),
-        help="Default 80% for external"
+        key="ext_cost_pct_input", help="Default 80% for external"
     ) / 100.0
     int_cost_pct = st.slider(
         "Internal Product Cost (% of sales)", 0, 100, int(st.session_state.int_cost_pct * 100),
-        help="Default 50% for internal"
+        key="int_cost_pct_input", help="Default 50% for internal"
     ) / 100.0
 
 with colC:
@@ -89,27 +108,32 @@ with colC:
         f"Fixed Costs per month ({unit})",
         min_value=0.0,
         value=st.session_state.fixed_m * mult,
-        step=25.0
+        step=25.0,
+        key="fixed_m_input"
     )
     repairs = st.number_input(
         f"Repairs & Maintenance this month ({unit})",
         min_value=0.0,
         value=st.session_state.repairs_m * mult,
-        step=10.0
+        step=10.0,
+        key="repairs_m_input"
     )
     fx_impact = st.number_input(
         f"FX / Exceptionals this month ({unit})",
         value=st.session_state.fx_m * mult,
         step=10.0,
+        key="fx_m_input",
         help="Positive = gain; Negative = loss"
     )
 
+# Convert to AUD'000 for calculations
 _ext_sales = ext_sales * conv
 _int_sales = int_sales * conv
 _fixed = fixed_costs * conv
 _repairs = repairs * conv
 _fx = fx_impact * conv
 
+# --------- Calculations (Monthly) ---------
 ext_base_margin = max(0.0, 1.0 - ext_cost_pct)
 int_base_margin = max(0.0, 1.0 - int_cost_pct)
 
@@ -118,14 +142,24 @@ int_gp = _int_sales * int_base_margin * efficiency
 total_gp = ext_gp + int_gp
 op = total_gp - _fixed - _repairs + _fx
 
+# Derived KPIs
+total_sales = _ext_sales + _int_sales
+annualize = 12.0
+annual_op = op * annualize
+annual_sales = total_sales * annualize
+
+# Break-even external sales (monthly)
 den = (ext_base_margin * efficiency)
 if den > 0:
     be_ext_sales = max(0.0, (_fixed + _repairs - _fx - int_gp) / den)
 else:
     be_ext_sales = math.inf
 
+# --------- Outputs ---------
 st.markdown("---")
-col1, col2, col3, col4 = st.columns(4)
+col0, col1, col2, col3, col4 = st.columns(5)
+with col0:
+    st.metric(f"Total Sales (per month, {unit})", f"{total_sales*mult:,.0f}")
 with col1:
     st.metric(f"External GP (per month, {unit})", f"{ext_gp*mult:,.0f}")
 with col2:
@@ -135,8 +169,11 @@ with col3:
 with col4:
     st.metric(f"Break-even External Sales (per month, {unit})", f"{be_ext_sales*mult:,.0f}")
 
+st.caption(f"Annualized totals → Sales: {annual_sales*mult:,.0f} {unit}, OP: {annual_op*mult:,.0f} {unit}")
+
 st.markdown("---")
 
+# Sensitivity: OP vs External Sales (monthly)
 base = int(_ext_sales if _ext_sales > 0 else BASELINE_MONTHLY["external_sales"])
 step = max(20, int(base * 0.10))
 sizes = list(range(int(base*0.5), int(base*1.8) + 1, step))
