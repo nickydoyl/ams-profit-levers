@@ -15,18 +15,25 @@ BASELINE_MONTHLY = {
     "external_sales": BASELINE_ANNUAL["external_sales"] / 12.0,
     "internal_sales": BASELINE_ANNUAL["internal_sales"] / 12.0,
     "fixed_costs": BASELINE_ANNUAL["fixed_costs"] / 12.0,
-    "efficiency": 0.51,
-    "ext_cost_pct": 0.80,
-    "int_cost_pct": 0.50,
+    "efficiency": 0.51,   # 51% current baseline
+    "ext_cost_pct": 0.80, # 80% external product cost
+    "int_cost_pct": 0.50, # 50% internal product cost
     "repairs": 0.0,
     "fx": 0.0,
+    # Reported HR slide (June 2025):
+    "headcount": 187,
+    "ot_hours": 6965.0,
+    "worked_hours": 29285.0,  # actual worked hours (excl. OT) per report slide
 }
+# Derive baseline overtime percent as share of worked hours (approx.)
+BASELINE_MONTHLY["overtime_pct"] = min(0.40, BASELINE_MONTHLY["ot_hours"] / BASELINE_MONTHLY["worked_hours"])  # ~= 0.238
 
 RESET_KEYS = [
     "currency","fx_rate","ext_sales_m","int_sales_m","ext_cost_pct",
     "int_cost_pct","efficiency","fixed_m","repairs_m","fx_m",
     "ext_sales_m_input","int_sales_m_input","ext_cost_pct_input",
-    "int_cost_pct_input","fixed_m_input","repairs_m_input","fx_m_input"
+    "int_cost_pct_input","fixed_m_input","repairs_m_input","fx_m_input",
+    "overtime_pct_input","ot_penalty_input"
 ]
 
 def reset_to_baseline():
@@ -45,6 +52,8 @@ def reset_to_baseline():
         "fixed_m": BASELINE_MONTHLY["fixed_costs"],
         "repairs_m": BASELINE_MONTHLY["repairs"],
         "fx_m": BASELINE_MONTHLY["fx"],
+        "overtime_pct": BASELINE_MONTHLY["overtime_pct"],
+        "ot_penalty_per_10pct": 0.05,  # default: every +10% OT reduces realised efficiency by 5%
     })
 
 # First run seed
@@ -85,6 +94,7 @@ with colA:
         step=50.0,
         key="int_sales_m_input"
     )
+    st.metric("Total Sales (per month, {})".format(unit), f"{(ext_sales+int_sales):,.0f}")
 
 with colB:
     st.subheader("Product Cost % of Sales")
@@ -98,11 +108,23 @@ with colB:
     ) / 100.0
 
 with colC:
-    st.subheader("Efficiency & Overheads (Monthly)")
+    st.subheader("Efficiency, Overtime & Overheads (Monthly)")
     efficiency = st.slider(
         "Operational Efficiency (30%–80%)",
         0.30, 0.80, st.session_state.efficiency, 0.01,
-        help="Current baseline is 51% (0.51). This multiplies the gross margin."
+        help="Current baseline is 51% (0.51). Multiplies the gross margin."
+    )
+    overtime_pct = st.slider(
+        "Overtime % of worked hours (0–40%)",
+        0.0, 0.40, float(st.session_state.get("overtime_pct", BASELINE_MONTHLY["overtime_pct"])), 0.01,
+        key="overtime_pct_input",
+        help="Based on June: ~6,965 OT hrs over ~29,285 worked hrs ≈ 24%."
+    )
+    ot_penalty_per_10pct = st.slider(
+        "Overtime efficiency penalty (per +10% OT)",
+        0.00, 0.10, float(st.session_state.get("ot_penalty_per_10pct", 0.05)), 0.01,
+        key="ot_penalty_input",
+        help="Every +10% OT reduces realised efficiency by this factor (default 5%)."
     )
     fixed_costs = st.number_input(
         f"Fixed Costs per month ({unit})",
@@ -137,8 +159,12 @@ _fx = fx_impact * conv
 ext_base_margin = max(0.0, 1.0 - ext_cost_pct)
 int_base_margin = max(0.0, 1.0 - int_cost_pct)
 
-ext_gp = _ext_sales * ext_base_margin * efficiency
-int_gp = _int_sales * int_base_margin * efficiency
+# Apply overtime penalty to efficiency: eff *= (1 - penalty * (OT% / 10%))
+ot_penalty_factor = max(0.0, 1.0 - ot_penalty_per_10pct * (overtime_pct / 0.10))
+eff_realised = max(0.10, min(0.95, efficiency * ot_penalty_factor))
+
+ext_gp = _ext_sales * ext_base_margin * eff_realised
+int_gp = _int_sales * int_base_margin * eff_realised
 total_gp = ext_gp + int_gp
 op = total_gp - _fixed - _repairs + _fx
 
@@ -149,7 +175,7 @@ annual_op = op * annualize
 annual_sales = total_sales * annualize
 
 # Break-even external sales (monthly)
-den = (ext_base_margin * efficiency)
+den = (ext_base_margin * eff_realised)
 if den > 0:
     be_ext_sales = max(0.0, (_fixed + _repairs - _fx - int_gp) / den)
 else:
@@ -157,9 +183,7 @@ else:
 
 # --------- Outputs ---------
 st.markdown("---")
-col0, col1, col2, col3, col4 = st.columns(5)
-with col0:
-    st.metric(f"Total Sales (per month, {unit})", f"{total_sales*mult:,.0f}")
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.metric(f"External GP (per month, {unit})", f"{ext_gp*mult:,.0f}")
 with col2:
@@ -167,9 +191,11 @@ with col2:
 with col3:
     st.metric(f"Operating Profit (per month, {unit})", f"{op*mult:,.0f}")
 with col4:
-    st.metric(f"Break-even External Sales (per month, {unit})", f"{be_ext_sales*mult:,.0f}")
+    st.metric(f"Break-even Ext Sales (per month, {unit})", f"{be_ext_sales*mult:,.0f}")
+with col5:
+    st.metric("Realised Efficiency", f"{eff_realised*100:.1f}%")
 
-st.caption(f"Annualized totals → Sales: {annual_sales*mult:,.0f} {unit}, OP: {annual_op*mult:,.0f} {unit}")
+st.caption(f"Annualized → Sales: {annual_sales*mult:,.0f} {unit}, OP: {annual_op*mult:,.0f} {unit}")
 
 st.markdown("---")
 
@@ -179,17 +205,24 @@ step = max(20, int(base * 0.10))
 sizes = list(range(int(base*0.5), int(base*1.8) + 1, step))
 rows = []
 for s in sizes:
-    gp = s * ext_base_margin * efficiency + int_gp
+    gp = s * ext_base_margin * eff_realised + int_gp
     opp = gp - _fixed - _repairs + _fx
     rows.append({"External Sales (AUD'000/month)": s, "OP (AUD'000/month)": opp})
 df = pd.DataFrame(rows)
 st.line_chart(df.set_index("External Sales (AUD'000/month)"))
 
+with st.expander("Reference: Headcount & OT from report"):
+    st.write(
+        f"- Headcount (June 2025): {BASELINE_MONTHLY['headcount']}\n"
+        f"- Overtime hours (month): {BASELINE_MONTHLY['ot_hours']:.0f}\n"
+        f"- Worked hours (actual, excl. OT): {BASELINE_MONTHLY['worked_hours']:.0f}\n"
+        f"- Baseline OT % of worked hours: {BASELINE_MONTHLY['overtime_pct']*100:.1f}%"
+    )
+
 with st.expander("How this works"):
     st.write(
-        f"- Baseline monthly sales: External ≈ {BASELINE_MONTHLY['external_sales']:.1f} AUD'000, "
-        f"Internal ≈ {BASELINE_MONTHLY['internal_sales']:.1f} AUD'000, Fixed ≈ {BASELINE_MONTHLY['fixed_costs']:.1f} AUD'000.\n"
-        "- Realised margin = (1 − product cost %) × efficiency.\n"
-        "- Efficiency slider is capped 30%–80% (current baseline 51%).\n"
+        "- Realised margin = (1 − product cost %) × realised efficiency\n"
+        "- Realised efficiency = Efficiency slider × (1 − OT penalty × (OT% / 10%))\n"
+        "- Default OT penalty: every +10% OT lowers realised efficiency by 5% (tunable).\n"
         "- All inputs are monthly; currency toggle is for display only."
     )
